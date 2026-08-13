@@ -204,7 +204,7 @@ if squadre_list:
                             "slots": slots
                         })
                 
-                if non risultati:
+                if not risultati:
                     st.warning("Nessun modulo schierabile con i giocatori a disposizione e i filtri impostati.")
                 else:
                     # Ordina dal punteggio FM più alto
