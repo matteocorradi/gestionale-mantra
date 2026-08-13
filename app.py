@@ -191,7 +191,7 @@ if squadre_list:
                 "nome": st.column_config.TextColumn("Nome", disabled=True),
                 "ruoli": st.column_config.TextColumn("Ruoli", disabled=True),
                 "fvm": st.column_config.NumberColumn("FVM", disabled=True),
-                "fanta_media": st.column_config.NumberColumn("FantaMedia Attesa", format="%.2f", step=0.1),
+                "fanta_media": st.column_config.NumberColumn("FantaMedia Attesa", format="%.2f", step=0.01),
                 "titolarita": st.column_config.NumberColumn("% Titolarità", min_value=0, max_value=100, step=1)
             },
             use_container_width=True
