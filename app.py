@@ -162,6 +162,27 @@ if squadre_list:
         df_rosa = pd.read_sql("SELECT id, nome, ruoli, fvm, fanta_media, titolarita FROM players WHERE squadra=?", conn, params=(mia_squadra,))
         df_rosa.set_index('id', inplace=True)
         
+        # --- LOGICA DI ORDINAMENTO RUOLI ---
+        ruoli_ordine = ['Por', 'Dc', 'Ds', 'Dd', 'E', 'M', 'C', 'T', 'W', 'A', 'Pc']
+        
+        def calcola_rank_ruolo(ruoli_str):
+            ruoli_singoli = [r.strip() for r in str(ruoli_str).split('/')]
+            rank_minimo = 99
+            for r in ruoli_singoli:
+                # Normalizziamo eventuale PC maiuscolo
+                if r.upper() == 'PC': r = 'Pc'
+                if r in ruoli_ordine:
+                    rank = ruoli_ordine.index(r)
+                    if rank < rank_minimo:
+                        rank_minimo = rank
+            return rank_minimo
+            
+        # Creiamo una colonna temporanea per il rank e ordiniamo (ruolo e poi FVM dal più alto)
+        df_rosa['rank_ordinamento'] = df_rosa['ruoli'].apply(calcola_rank_ruolo)
+        df_rosa = df_rosa.sort_values(by=['rank_ordinamento', 'fvm'], ascending=[True, False])
+        df_rosa = df_rosa.drop(columns=['rank_ordinamento'])
+        # -----------------------------------
+        
         # Tabella Modificabile per FM e Titolarità
         st.write("Modifica i campi **FantaMedia** e **Titolarità** direttamente in tabella (e premi Salva):")
         edited_df = st.data_editor(
