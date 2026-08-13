@@ -9,7 +9,6 @@ DB_NAME = "fanta_db.sqlite"
 EXCEL_FILE = "lista_calciatori_lista calciatori_mantra_premier-sif-elite.xlsx"
 EXCEL_CARMY = "Carmy Mantra 26_27.xlsx"
 
-# Definizione dei moduli Mantra e dei ruoli accettati per ogni singolo slot
 MODULI = {
     "3-4-3":   [['Por'], ['Dc', 'B'], ['Dc'], ['Dc', 'B'], ['E'], ['M', 'C'], ['C'], ['E'], ['W', 'A'], ['W', 'A'], ['Pc', 'A']],
     "3-4-1-2": [['Por'], ['Dc', 'B'], ['Dc'], ['Dc', 'B'], ['E'], ['M', 'C'], ['C'], ['E'], ['T'], ['Pc', 'A'], ['Pc', 'A']],
@@ -62,7 +61,6 @@ def sync_excel_to_db():
         if res:
             c.execute("UPDATE players SET ruoli=?, squadra=?, fvm=? WHERE id=?", (ruoli, squadra, fvm, p_id))
         else:
-            # Di base la titolarità è settata a 3 (scala 1-5)
             c.execute("INSERT INTO players (id, nome, ruoli, squadra, fvm, fanta_media, titolarita) VALUES (?, ?, ?, ?, ?, ?, ?)", 
                       (p_id, nome, ruoli, squadra, fvm, 6.0, 3))
     conn.commit()
@@ -79,7 +77,6 @@ def sync_carmy_to_db():
     c = conn.cursor()
     
     updated_count = 0
-    # Cicla su tutti i fogli dell'excel (un foglio per ruolo)
     for sheet in xls.sheet_names:
         df = pd.read_excel(EXCEL_CARMY, sheet_name=sheet)
         for _, row in df.iterrows():
@@ -93,11 +90,9 @@ def sync_carmy_to_db():
             if pd.isna(fmv_exp): fmv_exp = 6.0
             if pd.isna(titolarita): titolarita = 1
             
-            # Aggiorna il giocatore corrispondente nel DB basandosi sul nome esatto
             c.execute("UPDATE players SET fanta_media=?, titolarita=? WHERE nome=?", 
                       (float(fmv_exp), int(titolarita), str(nome)))
             
-            # Se ha trovato un giocatore con quel nome ed è stato modificato, incrementa il conteggio
             if c.rowcount > 0:
                 updated_count += 1
                 
@@ -108,9 +103,8 @@ def sync_carmy_to_db():
 # --- MOTORE DI OTTIMIZZAZIONE ---
 def calcola_formazione(df_rosa, modulo_slots):
     giocatori = df_rosa.to_dict('index')
-    p_ids = list(giocatori.keys())
     
-    def solve_squadra(pool_ids):
+    def solve_squadra(pool_ids, is_squadra_c=False):
         prob = pulp.LpProblem("Formazione", pulp.LpMaximize)
         x = pulp.LpVariable.dicts("x", (pool_ids, range(11)), cat='Binary')
         
@@ -139,24 +133,48 @@ def calcola_formazione(df_rosa, modulo_slots):
             trovato = False
             for i in pool_ids:
                 if x[i][s].varValue == 1.0:
-                    schierati.append(f"{giocatori[i]['nome']} ({giocatori[i]['ruoli']}) - {giocatori[i]['fanta_media']:.2f}")
+                    player_str = f"{giocatori[i]['nome']} ({giocatori[i]['ruoli']}) - {giocatori[i]['fanta_media']:.2f}"
+                    
+                    # Evidenzia in rosso se è nella Squadra C e ha titolarità 1
+                    if is_squadra_c and giocatori[i]['titolarita'] == 1:
+                        player_str = f":red[{player_str} (Tit. 1)]"
+                        
+                    schierati.append(player_str)
                     fm_tot += giocatori[i]['fanta_media']
                     usati.append(i)
                     trovato = True
                     break
             if not trovato:
-                schierati.append("Nessuna disponibilità (Slot Vuoto)")
+                schierati.append("Nessuna disponibilità")
         return schierati, usati, fm_tot
 
-    tit, usati_A, fm_A = solve_squadra(p_ids)
+    # Filtro Squadra A: Titolarità >= 3 OPPURE è un portiere
+    pool_A = [i for i, d in giocatori.items() if d['titolarita'] >= 3 or 'Por' in str(d['ruoli'])]
+    tit_A, usati_A, fm_A = solve_squadra(pool_A)
     
+    # Se i titolari non sono sufficienti per coprire il modulo, lo scartiamo
     if len(usati_A) < 11:
-        return None, None, 0
+        return None
         
-    pool_B = [p for p in p_ids if p not in usati_A]
-    riserve, _, _ = solve_squadra(pool_B)
+    # Filtro Squadra B: Non usati in A, Titolarità >= 2 OPPURE portiere
+    pool_B = [i for i, d in giocatori.items() if i not in usati_A and (d['titolarita'] >= 2 or 'Por' in str(d['ruoli']))]
+    tit_B, usati_B, _ = solve_squadra(pool_B)
     
-    return tit, riserve, fm_A
+    # Filtro Squadra C: Tutti quelli non usati in A e B
+    pool_C = [i for i in giocatori.keys() if i not in usati_A and i not in usati_B]
+    tit_C, usati_C, _ = solve_squadra(pool_C, is_squadra_c=True)
+    
+    # Esuberi: Quelli rimasti fuori da tutte le tre formazioni
+    usati_tutti = set(usati_A + usati_B + usati_C)
+    esuberi = [f"{d['nome']} ({d['ruoli']})" for i, d in giocatori.items() if i not in usati_tutti]
+    
+    return {
+        "tit_A": tit_A,
+        "tit_B": tit_B,
+        "tit_C": tit_C,
+        "esuberi": esuberi,
+        "fm_A": fm_A
+    }
 
 # --- INTERFACCIA WEB (STREAMLIT) ---
 st.set_page_config(page_title="Mantra Manager", layout="wide")
@@ -173,7 +191,6 @@ with col2:
     if st.button("📥 2. Importa FantaMedia e Titolarità (da file Carmy)"):
         sync_carmy_to_db()
 
-# Selezione Squadra
 conn = sqlite3.connect(DB_NAME)
 squadre_df = pd.read_sql("SELECT DISTINCT squadra FROM players WHERE squadra != ''", conn)
 squadre_list = squadre_df['squadra'].tolist()
@@ -185,14 +202,27 @@ if squadre_list:
         st.divider()
         st.subheader(f"La Rosa: {mia_squadra}")
         
-        # Slider Titolarità (Ora da 1 a 5)
-        soglia = st.slider("Soglia Minima Titolarità per la formazione:", min_value=1, max_value=5, value=3, step=1)
-        
         # Carica Rosa dal DB
         df_rosa = pd.read_sql("SELECT id, nome, ruoli, fvm, fanta_media, titolarita FROM players WHERE squadra=?", conn, params=(mia_squadra,))
         df_rosa.set_index('id', inplace=True)
         
-        # --- LOGICA DI ORDINAMENTO RUOLI ---
+        # Svincolo Veloce
+        with st.container():
+            col_testo, col_select, col_btn = st.columns([2, 3, 2])
+            with col_testo:
+                st.write("🗑️ **Svincola un calciatore:**")
+            with col_select:
+                nomi_rosa_ordinati = sorted(df_rosa['nome'].tolist())
+                giocatore_da_svincolare = st.selectbox("Seleziona giocatore", ["-- Nessuno --"] + nomi_rosa_ordinati, label_visibility="collapsed")
+            with col_btn:
+                if st.button("Svincola", type="primary") and giocatore_da_svincolare != "-- Nessuno --":
+                    c = conn.cursor()
+                    # Rimuoviamo il giocatore dalla squadra invece di eliminarlo, così se viene ri-comprato i dati storici restano
+                    c.execute("UPDATE players SET squadra='' WHERE nome=? AND squadra=?", (giocatore_da_svincolare, mia_squadra))
+                    conn.commit()
+                    st.rerun()
+
+        # Ordinamento per Ruoli e FVM
         ruoli_ordine = ['Por', 'Dc', 'Ds', 'Dd', 'E', 'M', 'C', 'T', 'W', 'A', 'Pc']
         
         def calcola_rank_ruolo(ruoli_str):
@@ -209,9 +239,8 @@ if squadre_list:
         df_rosa['rank_ordinamento'] = df_rosa['ruoli'].apply(calcola_rank_ruolo)
         df_rosa = df_rosa.sort_values(by=['rank_ordinamento', 'fvm'], ascending=[True, False])
         df_rosa = df_rosa.drop(columns=['rank_ordinamento'])
-        # -----------------------------------
         
-        st.write("Modifica i campi se necessario (i dati di Carmy vengono applicati al volo):")
+        # Griglia Dati
         edited_df = st.data_editor(
             df_rosa,
             column_config={
@@ -235,43 +264,57 @@ if squadre_list:
         st.divider()
         st.subheader("⚙️ Calcolo Miglior Formazione")
         
-        if st.button("🚀 Calcola Moduli e Riserve"):
-            with st.spinner("Ottimizzazione in corso..."):
-                # Eccezione Portieri: filtrati indipendentemente dallo slider
-                df_filtrato = edited_df[(edited_df['titolarita'] >= soglia) | (edited_df['ruoli'].str.contains('Por'))]
-                
+        if st.button("🚀 Calcola Moduli"):
+            with st.spinner("Calcolo combinazioni in corso..."):
                 risultati = []
                 for nome_modulo, slots in MODULI.items():
-                    titolari, riserve, fm_tot = calcola_formazione(df_filtrato, slots)
-                    if titolari is not None:
+                    res = calcola_formazione(edited_df, slots)
+                    if res is not None:
                         risultati.append({
                             "modulo": nome_modulo,
-                            "fm": fm_tot,
-                            "titolari": titolari,
-                            "riserve": riserve,
+                            "fm": res["fm_A"],
+                            "titolari": res["tit_A"],
+                            "riserve": res["tit_B"],
+                            "squadra_c": res["tit_C"],
+                            "esuberi": res["esuberi"],
                             "slots": slots
                         })
                 
                 if not risultati:
-                    st.warning("Nessun modulo schierabile con i giocatori a disposizione e i filtri impostati.")
+                    st.warning("Nessun modulo schierabile con i giocatori a disposizione (Titolarità >= 3 richiesta per i titolari).")
                 else:
                     risultati.sort(key=lambda x: x["fm"], reverse=True)
                     st.success(f"Trovati {len(risultati)} moduli validi!")
                     
                     for res in risultati:
-                        with st.expander(f"🏆 {res['modulo']} - FantaMedia Totale: {res['fm']:.2f}"):
-                            col_tit, col_ris = st.columns(2)
+                        with st.expander(f"🏆 {res['modulo']} - FantaMedia Totale Squadra A: {res['fm']:.2f}"):
+                            # Divide lo spazio in 4 colonne per far stare tutto ordinatamente
+                            col_A, col_B, col_C, col_Esub = st.columns(4)
                             
-                            with col_tit:
-                                st.markdown("### 🟢 TITOLARI (Squadra A)")
+                            with col_A:
+                                st.markdown("### 🟢 SQUADRA A")
                                 for i in range(11):
                                     ruoli_richiesti = "/".join(res['slots'][i])
                                     st.write(f"**[{ruoli_richiesti}]** {res['titolari'][i]}")
                                     
-                            with col_ris:
-                                st.markdown("### 🟡 RISERVE (Squadra B)")
+                            with col_B:
+                                st.markdown("### 🟡 SQUADRA B")
                                 for i in range(11):
                                     ruoli_richiesti = "/".join(res['slots'][i])
                                     st.write(f"**[{ruoli_richiesti}]** {res['riserve'][i]}")
+
+                            with col_C:
+                                st.markdown("### 🟠 SQUADRA C")
+                                for i in range(11):
+                                    ruoli_richiesti = "/".join(res['slots'][i])
+                                    st.write(f"**[{ruoli_richiesti}]** {res['squadra_c'][i]}")
+                                    
+                            with col_Esub:
+                                st.markdown("### ⚪ ESUBERI")
+                                if res['esuberi']:
+                                    for esub in res['esuberi']:
+                                        st.write(f"• {esub}")
+                                else:
+                                    st.write("Nessun esubero")
 
 conn.close()
